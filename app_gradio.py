@@ -12,46 +12,71 @@ PADDLESPEECH_API_BASE_URL = "http://0.0.0.0:8092"
 # --- API Call Helper Function ---
 
 def call_api(method, endpoint, json_payload=None, params=None):
-    """Generic function to call the API and handle basic responses."""
+    """
+    Generic function to call the API.
+    Returns:
+        - (parsed_json_data, None) if successful and JSON is valid. 
+          parsed_json_data can be any Python type corresponding to JSON types (dict, list, str, int, etc.).
+        - (error_dict, "APIError") if HTTPError or RequestException. error_dict contains error details.
+        - (error_dict, "InvalidJSONError") if response is not valid JSON. error_dict contains raw text.
+        - (error_dict, "ClientError") for other client-side issues like unsupported method.
+    """
     url = f"{PADDLESPEECH_API_BASE_URL}{endpoint}"
+    response_obj = None # To store response for error reporting if available
     try:
         if method.upper() == "GET":
-            response = requests.get(url, params=params)
+            response_obj = requests.get(url, params=params)
         elif method.upper() == "POST":
-            response = requests.post(url, json=json_payload)
+            response_obj = requests.post(url, json=json_payload)
         else:
-            return {"error": f"Unsupported HTTP method: {method}"}, None
+            return {"error": f"Unsupported HTTP method: {method}"}, "ClientError"
 
-        response.raise_for_status() # Raise HTTPError for 4xx/5xx status codes
+        response_obj.raise_for_status() 
 
-        # Try to parse JSON, if it fails, return raw text
         try:
-            data = response.json()
+            data = response_obj.json()
+            return data, None 
         except requests.exceptions.JSONDecodeError:
-            data = response.text # If response is not JSON (e.g., a simple string)
-        return data, None # data, error_message
+            return {"error": "Response from API was not valid JSON.", "raw_response_text": response_obj.text}, "InvalidJSONError"
     
     except requests.exceptions.HTTPError as http_err:
-        error_message = f"HTTP error: {http_err} - Response: {response.text}"
-        return None, error_message
+        error_text = response_obj.text if response_obj else "No response object available."
+        return {"error": f"HTTP error: {http_err}", "response_text": error_text}, "APIError"
     except requests.exceptions.RequestException as req_err:
-        error_message = f"Request error: {req_err}"
-        return None, error_message
-    except Exception as e:
-        error_message = f"An unexpected error occurred: {e}"
-        return None, error_message
+        return {"error": f"Request error: {req_err}"}, "APIError"
+    except Exception as e: 
+        return {"error": f"An unexpected client-side error occurred: {e}"}, "ClientError"
+
+# Helper to format data for gr.JSON output component
+def format_for_json_output(api_data, error_type_from_call_api, error_payload_from_call_api):
+    """
+    Ensures the data returned to a gr.JSON component is a dictionary or list.
+    Wraps primitives in a dictionary: {"value": primitive}.
+    Passes through dictionaries, lists, and error dictionaries.
+    """
+    if error_type_from_call_api:
+        # error_payload_from_call_api is already a dict (the error_dict from call_api)
+        return error_payload_from_call_api
+    
+    # If no error from call_api, api_data is the successfully parsed JSON data
+    if isinstance(api_data, (dict, list)):
+        return api_data # Already a dict/list, suitable for gr.JSON
+    else:
+        # Wrap primitives (str, int, float, bool, None) in a dict
+        return {"value": api_data}
 
 # --- Functions for each API Endpoint ---
 
 def get_tts_help_func():
-    response_data, error = call_api("GET", "/paddlespeech/tts/help")
-    if error:
-        return {"error": error}
-    return response_data
+    api_result, error_type = call_api("GET", "/paddlespeech/tts/help")
+    # If call_api had an error, api_result is the error dictionary.
+    # Otherwise, api_result is the parsed data from response.json().
+    return format_for_json_output(api_result, error_type, api_result if error_type else None)
 
 def generate_tts_func(text, spk_id, speed, volume, sample_rate_input, save_path_server):
     if not text:
-        return "Input text cannot be empty.", None, None
+        # Ensure all return paths match the number of outputs for this function
+        return "Input text cannot be empty.", None, {"error": "Input text cannot be empty."}
 
     payload = {
         "text": text,
@@ -62,41 +87,47 @@ def generate_tts_func(text, spk_id, speed, volume, sample_rate_input, save_path_
         "save_path": save_path_server if save_path_server else "output_from_gradio.wav"
     }
     
-    response_data, error = call_api("POST", "/paddlespeech/tts", json_payload=payload)
+    api_result, error_type = call_api("POST", "/paddlespeech/tts", json_payload=payload)
 
-    if error:
-        return f"Error: {error}", None, response_data # Status, Audio, JSON Response
+    # For the JSON output component, format the result/error
+    # If call_api had an error, api_result is the error dictionary.
+    # Otherwise, api_result is the parsed data (expected to be a dict for this endpoint).
+    json_to_display = format_for_json_output(api_result, error_type, api_result if error_type else None)
 
-    if response_data and response_data.get("success"):
-        result = response_data.get("result", {})
-        audio_base64 = result.get("audio")
+    if error_type:
+        # api_result is the error dictionary
+        return f"Error: {api_result.get('error', 'Unknown API error')}", None, json_to_display
+
+    # No error from call_api, api_result is the parsed JSON (expected to be a dict for this endpoint)
+    if api_result and api_result.get("success"):
+        result_data = api_result.get("result", {})
+        audio_base64 = result_data.get("audio")
         
         if audio_base64:
             try:
                 audio_bytes = base64.b64decode(audio_base64)
-                # Use soundfile to read the actual sample rate and data from WAV audio bytes
-                # This is safer as it gets the actual sample rate from the WAV header
                 audio_data_np, actual_sr_from_wav = sf.read(io.BytesIO(audio_bytes), dtype='float32')
                 
-                # Gradio Audio component needs (sample_rate, numpy_array)
-                # or a file path. We use the former.
                 status_message = f"Success! Audio generated. Actual sample rate: {actual_sr_from_wav} Hz."
-                if result.get("save_path"):
-                    status_message += f" Saved on server as: {result['save_path']}"
+                if result_data.get("save_path"):
+                    status_message += f" Saved on server as: {result_data['save_path']}"
                 
-                return status_message, (actual_sr_from_wav, audio_data_np), response_data
+                return status_message, (actual_sr_from_wav, audio_data_np), json_to_display
             except Exception as e:
-                return f"Error processing audio: {e}", None, response_data
+                return f"Error processing audio: {e}", None, \
+                       format_for_json_output({"error": "Audio processing failed", "details": str(e)}, "ClientError", None)
         else:
-            return "Success, but no audio data in response.", None, response_data
+            return "Success, but no audio data in response.", None, json_to_display
     else:
-        err_msg = response_data.get("message", {}).get("description", "Unknown error from API.") if response_data else "No response from API."
-        return f"Failed to generate audio: {err_msg}", None, response_data
+        # Handle cases where API call was successful HTTP-wise, but "success" flag in JSON is false or missing
+        err_msg = api_result.get("message", {}).get("description", "API indicated failure or unexpected response structure.")
+        return f"Failed to generate audio: {err_msg}", None, json_to_display
 
 
 def stream_tts_func(text, spk_id, speed, volume, sample_rate_input, save_path_server):
     if not text:
-        return "Input text for streaming cannot be empty.", None
+        return "Input text for streaming cannot be empty.", \
+               format_for_json_output({"error": "Input text for streaming cannot be empty."}, "ClientError", None)
 
     payload = {
         "text": text,
@@ -109,24 +140,23 @@ def stream_tts_func(text, spk_id, speed, volume, sample_rate_input, save_path_se
     
     # The streaming API might have different response behavior.
     # The OpenAPI spec says a successful response is a "string" within application/json.
-    response_data, error = call_api("POST", "/paddlespeech/tts/streaming", json_payload=payload)
+    api_result, error_type = call_api("POST", "/paddlespeech/tts/streaming", json_payload=payload)
+    json_to_display = format_for_json_output(api_result, error_type, api_result if error_type else None)
 
-    if error:
-        return f"Error: {error}", response_data # Status, JSON Response
+    if error_type:
+        return f"Error: {api_result.get('error', 'Unknown API error')}", json_to_display
     
-    # Since Gradio doesn't natively handle continuous streaming audio easily,
-    # we'll just display the initial server response.
-    status_message = f"Streaming request sent. Server response:"
-    return status_message, response_data
+    status_message = "Streaming request sent. Server response:"
+    return status_message, json_to_display
 
 
 def get_streaming_samplerate_func():
-    response_data, error = call_api("GET", "/paddlespeech/tts/streaming/samplerate")
-    if error:
-        return {"error": error}
-    return response_data
+    api_result, error_type = call_api("GET", "/paddlespeech/tts/streaming/samplerate")
+    return format_for_json_output(api_result, error_type, api_result if error_type else None)
 
 # --- Create Gradio Interface ---
+# The Gradio UI layout (gr.Blocks, gr.TabItem, etc.) remains the same as your existing code.
+# Ensure all .click() calls correctly map to these updated functions and their outputs.
 
 with gr.Blocks(theme=gr.themes.Soft()) as demo:
     gr.Markdown("# Gradio Interface for PaddleSpeech TTS API")
@@ -146,7 +176,7 @@ with gr.Blocks(theme=gr.themes.Soft()) as demo:
                     tts_submit_button = gr.Button("Generate Audio", variant="primary")
                 with gr.Column(scale=3):
                     tts_status_output = gr.Textbox(label="Status", interactive=False)
-                    tts_audio_output = gr.Audio(label="Generated Audio", type="numpy") # type="numpy" as we send (sr, data)
+                    tts_audio_output = gr.Audio(label="Generated Audio", type="numpy") 
                     tts_json_output = gr.JSON(label="API Response (JSON)")
             
             tts_submit_button.click(
@@ -202,5 +232,4 @@ with gr.Blocks(theme=gr.themes.Soft()) as demo:
 # If both API and Gradio run on the same machine, and you only access from local network,
 # share=False or not setting it is also sufficient.
 if __name__ == "__main__":
-    demo.launch(share=True) # Set share=True to get a public link
-    # For local development without a public link: demo.launch()
+    demo.launch(share=True)
