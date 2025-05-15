@@ -198,18 +198,25 @@ class CommonTaskResource:
                 else:
                     del self.pretrained_models[model_tag]
         elif self.task == 'tts':
-            # Hardcode for tts online models.
-            tts_online_models = [
-                'fastspeech2_csmsc-zh', 'fastspeech2_cnndecoder_csmsc-zh',
-                'mb_melgan_csmsc-zh', 'hifigan_csmsc-zh'
-            ]
-            for model_tag in list(self.pretrained_models.keys()):
-                if inference_mode == 'online' and model_tag in tts_online_models:
-                    continue
-                elif inference_mode == 'offline':
-                    continue
-                else:
-                    del self.pretrained_models[model_tag]
+            # For TTS task with 'online' inference_mode.
+            # The previous hardcoded list 'tts_online_models' was too restrictive.
+            # Now, if inference_mode is 'online', we don't apply specific filtering here.
+            # All models from tts_dynamic_pretrained_models will be available for the
+            # tts_online engine to check against.
+            # Suitability for actual streaming (e.g. chunk-by-chunk AM processing)
+            # is a characteristic of the specific model architecture (e.g. fastspeech2_cnndecoder)
+            # and should be handled by engine/model capabilities rather than a global filter here.
+            if inference_mode == 'online':
+                # No specific model removal for 'online' TTS mode here.
+                # All models loaded into self.pretrained_models (which are tts_dynamic_pretrained_models)
+                # will be retained for the tts_online engine.
+                pass
+            elif inference_mode == 'offline':
+                # For 'offline' mode, all dynamic TTS models are considered available.
+                # No specific filtering is applied here either.
+                pass
+            # Note: The loop that previously deleted models if they weren't in
+            # the hardcoded 'tts_online_models' list (for online mode) is now removed.
         else:
             raise NotImplementedError('Only supports asr and tts task.')
 
