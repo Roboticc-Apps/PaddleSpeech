@@ -196,17 +196,28 @@ class TTSEngine(BaseEngine):
         self.am_upsample = 1
         self.voc_upsample = self.config.voc_upsample
 
-        assert (
-            self.config.am == "fastspeech2_csmsc_onnx" or
-            self.config.am == "fastspeech2_cnndecoder_csmsc_onnx"
-        ) and (
-            self.config.voc == "hifigan_csmsc_onnx" or
-            self.config.voc == "mb_melgan_csmsc_onnx"
-        ), 'Please check config, am support: fastspeech2, voc support: hifigan_csmsc-zh or mb_melgan_csmsc.'
+        # Construct model tags to check against the list of pretrained ONNX models
+        # For ONNX, model names in config (e.g., self.config.am) should already end with _onnx
+        am_tag_to_check = f"{self.config.am}-{self.config.lang}"
+        voc_tag_to_check = f"{self.config.voc}-{self.config.lang}"
+
+        # Get available ONNX models from the executor's task_resource
+        # TTSServerExecutor initializes its task_resource with model_format='onnx'
+        available_onnx_models = self.executor.task_resource.pretrained_models.keys()
+
+        assert am_tag_to_check in available_onnx_models, \
+            f"Acoustic model '{am_tag_to_check}' not found in available pretrained ONNX models. " \
+            f"Ensure AM name ('{self.config.am}') and language ('{self.config.lang}') " \
+            f"form a valid ONNX model tag. Available ONNX models: {list(available_onnx_models)}"
+
+        assert voc_tag_to_check in available_onnx_models, \
+            f"Vocoder model '{voc_tag_to_check}' not found in available pretrained ONNX models. " \
+            f"Ensure Vocoder name ('{self.config.voc}') and language ('{self.config.lang}') " \
+            f"form a valid ONNX model tag. Available ONNX models: {list(available_onnx_models)}"
 
         assert (
             self.config.voc_block > 0 and self.config.voc_pad > 0
-        ), "Please set correct voc_block and voc_pad, they should be more than 0."
+        ), "Please set correct voc_block and voc_pad, they should be greater than 0."
 
         assert (
             self.config.voc_sample_rate == self.config.am_sample_rate
@@ -248,14 +259,14 @@ class TTSEngine(BaseEngine):
                 lang=self.config.lang)
 
         except Exception as e:
-            logger.error("Failed to get model related files.")
-            logger.error("Initialize TTS server engine Failed on device: %s." %
-                         (self.config.voc_sess_conf.device))
-            logger(e)
+            device_info = self.config.voc_sess_conf.device if hasattr(self.config, 'voc_sess_conf') and hasattr(self.config.voc_sess_conf, 'device') else 'cpu'
+            logger.error(f"Failed to initialize TTS ONNX executor with AM: {self.config.am} and Vocoder: {self.config.voc}.")
+            logger.error("Initialize TTS server engine Failed on device: %s." % device_info)
+            logger.error(e) # Use logger.error for consistency
             return False
 
-        logger.info("Initialize TTS server engine successfully on device: %s." %
-                    (self.config.voc_sess_conf.device))
+        device_info = self.config.voc_sess_conf.device if hasattr(self.config, 'voc_sess_conf') and hasattr(self.config.voc_sess_conf, 'device') else 'cpu'
+        logger.info("Initialize TTS server engine successfully on device: %s." % device_info)
 
         return True
 

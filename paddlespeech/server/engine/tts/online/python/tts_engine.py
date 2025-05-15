@@ -235,16 +235,27 @@ class TTSEngine(BaseEngine):
         self.lang = self.config.lang
         self.engine_type = "online"
 
-        assert (
-            config.am == "fastspeech2_csmsc" or
-            config.am == "fastspeech2_cnndecoder_csmsc"
-        ) and (
-            config.voc == "hifigan_csmsc" or config.voc == "mb_melgan_csmsc"
-        ), 'Please check config, am support: fastspeech2, voc support: hifigan_csmsc-zh or mb_melgan_csmsc.'
+        # Construct model tags to check against the list of pretrained models
+        am_tag_to_check = f"{self.config.am}-{self.config.lang}"
+        voc_tag_to_check = f"{self.config.voc}-{self.config.lang}"
+
+        # Get available models from the executor's task_resource
+        # TTSServerExecutor initializes its task_resource with model_format='dynamic'
+        available_dynamic_models = self.executor.task_resource.pretrained_models.keys()
+
+        assert am_tag_to_check in available_dynamic_models, \
+            f"Acoustic model '{am_tag_to_check}' not found in available pretrained dynamic models. " \
+            f"Ensure AM name ('{self.config.am}') and language ('{self.config.lang}') " \
+            f"form a valid tag. Available models: {list(available_dynamic_models)}"
+
+        assert voc_tag_to_check in available_dynamic_models, \
+            f"Vocoder model '{voc_tag_to_check}' not found in available pretrained dynamic models. " \
+            f"Ensure Vocoder name ('{self.config.voc}') and language ('{self.config.lang}') " \
+            f"form a valid tag. Available models: {list(available_dynamic_models)}"
 
         assert (
             config.voc_block > 0 and config.voc_pad > 0
-        ), "Please set correct voc_block and voc_pad, they should be more than 0."
+        ), "Please set correct voc_block and voc_pad, they should be greater than 0."
 
         try:
             if self.config.device is not None:
@@ -276,7 +287,7 @@ class TTSEngine(BaseEngine):
                 voc_stat=self.config.voc_stat,
                 lang=self.config.lang)
         except Exception as e:
-            logger.error("Failed to get model related files.")
+            logger.error(f"Failed to initialize TTS executor with AM: {self.config.am} and Vocoder: {self.config.voc}.")
             logger.error("Initialize TTS server engine Failed on device: %s." %
                          (self.device))
             logger.error(e)
