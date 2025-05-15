@@ -4,6 +4,13 @@ import base64
 import soundfile as sf
 import numpy as np
 import io
+import logging # Ditambahkan untuk logging
+import os # Dipertahankan jika diperlukan di tempat lain
+from urllib.parse import urljoin # Dipertahankan jika diperlukan di tempat lain
+
+# Konfigurasi logging dasar
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # --- API Configuration ---
 # Replace with your PaddleSpeech API base URL if different or publicly deployed
@@ -11,41 +18,47 @@ PADDLESPEECH_API_BASE_URL = "http://0.0.0.0:8092"
 
 # --- API Call Helper Function ---
 
-def call_api(method, endpoint, json_payload=None, params=None):
+def call_api(method, endpoint, json_payload=None, params=None, expect_json=True):
     """
     Generic function to call the API.
     Returns:
-        - (parsed_json_data, None) if successful and JSON is valid. 
-          parsed_json_data can be any Python type corresponding to JSON types (dict, list, str, int, etc.).
-        - (error_dict, "APIError") if HTTPError or RequestException. error_dict contains error details.
-        - (error_dict, "InvalidJSONError") if response is not valid JSON. error_dict contains raw text.
-        - (error_dict, "ClientError") for other client-side issues like unsupported method.
+        - (parsed_json_data, None, headers) if successful, JSON is valid, and expect_json is True.
+        - (response_bytes, None, headers) if successful and expect_json is False.
+        - (error_dict, "APIError", headers) if HTTPError or RequestException. error_dict contains error details.
+        - (error_dict, "InvalidJSONError", headers) if response is not valid JSON and expect_json is True.
+        - (error_dict, "ClientError", None) for other client-side issues like unsupported method.
     """
     url = f"{PADDLESPEECH_API_BASE_URL}{endpoint}"
-    response_obj = None # To store response for error reporting if available
+    response_obj = None 
     try:
         if method.upper() == "GET":
             response_obj = requests.get(url, params=params)
         elif method.upper() == "POST":
-            response_obj = requests.post(url, json=json_payload)
+            response_obj = requests.post(url, json=json_payload) # Payload ke server tetap JSON
         else:
-            return {"error": f"Unsupported HTTP method: {method}"}, "ClientError"
+            return {"error": f"Unsupported HTTP method: {method}"}, "ClientError", None
 
         response_obj.raise_for_status() 
 
-        try:
-            data = response_obj.json()
-            return data, None 
-        except requests.exceptions.JSONDecodeError:
-            return {"error": "Response from API was not valid JSON.", "raw_response_text": response_obj.text}, "InvalidJSONError"
+        if expect_json:
+            try:
+                data = response_obj.json()
+                return data, None, response_obj.headers
+            except requests.exceptions.JSONDecodeError:
+                return {"error": "Response from API was not valid JSON.", "raw_response_text": response_obj.text}, "InvalidJSONError", response_obj.headers
+        else:
+            # Jika tidak mengharapkan JSON, kembalikan konten mentah dan header
+            return response_obj.content, None, response_obj.headers # Mengembalikan bytes
     
     except requests.exceptions.HTTPError as http_err:
         error_text = response_obj.text if response_obj else "No response object available."
-        return {"error": f"HTTP error: {http_err}", "response_text": error_text}, "APIError"
+        headers = response_obj.headers if response_obj else None
+        return {"error": f"HTTP error: {http_err}", "response_text": error_text}, "APIError", headers
     except requests.exceptions.RequestException as req_err:
-        return {"error": f"Request error: {req_err}"}, "APIError"
+        # RequestException bisa terjadi sebelum response_obj ada (mis. DNS failure)
+        return {"error": f"Request error: {req_err}"}, "APIError", None
     except Exception as e: 
-        return {"error": f"An unexpected client-side error occurred: {e}"}, "ClientError"
+        return {"error": f"An unexpected client-side error occurred: {e}"}, "ClientError", None
 
 # Helper to format data for gr.JSON output component
 def format_for_json_output(api_data, error_type_from_call_api, error_payload_from_call_api):
@@ -126,7 +139,7 @@ def generate_tts_func(text, spk_id, speed, volume, sample_rate_input, save_path_
 
 def stream_tts_func(text, spk_id, speed, volume, sample_rate_input, save_path_server):
     if not text:
-        return "Input text for streaming cannot be empty.", \
+        return "Input text for streaming cannot be empty.", None, \
                format_for_json_output({"error": "Input text for streaming cannot be empty."}, "ClientError", None)
 
     payload = {
@@ -134,20 +147,69 @@ def stream_tts_func(text, spk_id, speed, volume, sample_rate_input, save_path_se
         "spk_id": int(spk_id),
         "speed": float(speed),
         "volume": float(volume),
-        "sample_rate": int(sample_rate_input),
-        "save_path": save_path_server if save_path_server else "stream_output_from_gradio.wav"
+        "sample_rate": int(sample_rate_input), # Ini adalah sample rate yang diminta ke server
+        "save_path": save_path_server if save_path_server else "stream_output_from_gradio.wav" # Server mungkin menggunakan ini
     }
     
-    # The streaming API might have different response behavior.
-    # The OpenAPI spec says a successful response is a "string" within application/json.
-    api_result, error_type = call_api("POST", "/paddlespeech/tts/streaming", json_payload=payload)
-    json_to_display = format_for_json_output(api_result, error_type, api_result if error_type else None)
+    # Panggil API, harapkan respons biner (audio mentah), bukan JSON
+    api_result_data, error_type, response_headers = call_api(
+        "POST", "/paddlespeech/tts/streaming", json_payload=payload, expect_json=False
+    )
+
+    json_to_display = {} # Untuk menampilkan status atau error di komponen JSON
 
     if error_type:
-        return f"Error: {api_result.get('error', 'Unknown API error')}", json_to_display
-    
-    status_message = "Streaming request sent. Server response:"
-    return status_message, json_to_display
+        # api_result_data di sini adalah error dictionary dari call_api
+        json_to_display = format_for_json_output(api_result_data, error_type, api_result_data if error_type else None)
+        return f"Error: {api_result_data.get('error', 'Unknown API error')}", None, json_to_display
+
+    # Tidak ada error dari call_api, api_result_data adalah byte audio
+    if api_result_data and isinstance(api_result_data, bytes):
+        try:
+            actual_sr = 0
+            # Coba dapatkan sample rate dari header (misalnya, server mengirim 'X-Audio-Sample-Rate')
+            # Nama header ini hanya contoh, perlu disesuaikan dengan implementasi server Anda
+            if response_headers:
+                if response_headers.get('X-Audio-Sample-Rate'):
+                    actual_sr = int(response_headers.get('X-Audio-Sample-Rate'))
+                # Jika Content-Type adalah audio/wav, soundfile akan mencoba mendeteksi SR dari header WAV
+                # jadi kita tidak perlu secara eksplisit mengambilnya dari Content-Type di sini.
+
+            # Baca byte audio menjadi array NumPy
+            # soundfile.read akan mencoba mendeteksi format dan sample rate jika memungkinkan (misalnya dari header WAV)
+            audio_data_np, sr_from_file = sf.read(io.BytesIO(api_result_data), dtype='float32')
+
+            if actual_sr == 0: # Jika kita tidak tahu SR dari header
+                actual_sr = sr_from_file # Gunakan SR yang dideteksi soundfile
+            elif actual_sr != sr_from_file and sr_from_file != 0:
+                logger.warning(f"Sample rate dari header ({actual_sr} Hz) berbeda dengan yang dideteksi dari file ({sr_from_file} Hz). Menggunakan SR dari file.")
+                actual_sr = sr_from_file
+
+
+            if actual_sr == 0 and int(sample_rate_input) != 0: # Fallback ke input pengguna jika masih 0
+                 actual_sr = int(sample_rate_input)
+                 logger.warning(f"Sample rate tidak dapat dideteksi dari server/file, menggunakan input pengguna: {actual_sr} Hz.")
+            elif actual_sr == 0:
+                actual_sr = 24000 # Fallback absolut jika semua gagal (sesuaikan jika perlu)
+                logger.error(f"Sample rate tidak dapat ditentukan, menggunakan default absolut: {actual_sr} Hz. Audio mungkin tidak diputar dengan benar.")
+
+
+            status_message = f"Success! Audio received. Sample rate: {actual_sr} Hz."
+            if save_path_server: # Jika server mungkin telah menyimpan file
+                 status_message += f" Server mungkin telah menyimpan sebagai '{save_path_server}'."
+
+            json_to_display = {"status": "success", "message": status_message, "sample_rate": actual_sr}
+            return status_message, (actual_sr, audio_data_np), json_to_display
+        except Exception as e:
+            status_message = f"Error processing received audio: {e}"
+            logger.error(f"Error processing audio: {e}", exc_info=True)
+            raw_text_preview = api_result_data[:100].decode('latin-1') if isinstance(api_result_data, bytes) else str(api_result_data)[:100]
+            json_to_display = {"status": "error", "message": status_message, "details": str(e), "raw_preview": raw_text_preview}
+            return status_message, None, json_to_display
+    else:
+        status_message = "API call successful but no audio data (bytes) received."
+        json_to_display = {"status": "warning", "message": status_message}
+        return status_message, None, json_to_display
 
 
 def get_streaming_samplerate_func():
@@ -161,6 +223,13 @@ def get_streaming_samplerate_func():
 with gr.Blocks(theme=gr.themes.Soft()) as demo:
     gr.Markdown("# Gradio Interface for PaddleSpeech TTS API")
     gr.Markdown(f"Using API at: `{PADDLESPEECH_API_BASE_URL}`")
+    # Menghapus catatan spesifik tentang /static/ karena streaming sekarang menangani audio langsung
+    # gr.Markdown(
+    #     "**Penting**: Agar audio streaming dapat diputar, server API PaddleSpeech Anda "
+    #     "harus dikonfigurasi untuk menyajikan file audio yang disimpan melalui URL yang dapat diakses publik "
+    #     f"(misalnya, di bawah `{PADDLESPEECH_API_BASE_URL}/static/...`). "
+    #     "Fungsi ini mengasumsikan konfigurasi server seperti itu."
+    # )
 
     with gr.Tabs():
         with gr.TabItem("Standard TTS"):
@@ -186,10 +255,11 @@ with gr.Blocks(theme=gr.themes.Soft()) as demo:
             )
 
         with gr.TabItem("Streaming TTS (Info)"):
-            gr.Markdown("## Streaming TTS (Request Info)")
+        with gr.TabItem("Streaming TTS"): # Nama tab diubah sedikit
+            gr.Markdown("## Streaming TTS (Request and Play)") # Judul diubah
             gr.Markdown(
-                "**Note:** This interface will send a streaming TTS request and display the initial server response. "
-                "Gradio does not directly play chunked streaming audio without advanced customization."
+                "**Note:** This interface will send a TTS request to the streaming endpoint. "
+                "If successful, the received audio will be playable below."
             )
             with gr.Row():
                 with gr.Column(scale=2):
@@ -197,17 +267,18 @@ with gr.Blocks(theme=gr.themes.Soft()) as demo:
                     stream_spk_id_input = gr.Number(label="Speaker ID (spk_id)", value=0, precision=0)
                     stream_speed_input = gr.Slider(label="Speed", minimum=0.1, maximum=3.0, value=1.0, step=0.1)
                     stream_volume_input = gr.Slider(label="Volume", minimum=0.1, maximum=2.0, value=1.0, step=0.1)
-                    stream_samplerate_input = gr.Dropdown(label="Input Sample Rate (0 for server default)", choices=[0, 8000, 16000, 22050, 24000, 44100, 48000], value=0, type="value", allow_custom_value=True)
-                    stream_savepath_input = gr.Textbox(label="Save Path on Server (optional)", placeholder="example_stream_output.wav")
+                    stream_samplerate_input = gr.Dropdown(label="Input Sample Rate (0 for server default/detect)", choices=[0, 8000, 16000, 22050, 24000, 44100, 48000], value=0, type="value", allow_custom_value=True)
+                    stream_savepath_input = gr.Textbox(label="Save Filename on Server (optional, server-dependent)", placeholder="stream_output.wav") # Label diubah
                     stream_submit_button = gr.Button("Start Streaming TTS", variant="primary")
                 with gr.Column(scale=3):
                     stream_status_output = gr.Textbox(label="Request Status", interactive=False)
-                    stream_json_output = gr.JSON(label="Streaming API Response (JSON)")
+                    stream_audio_output = gr.Audio(label="Streamed Audio", type="numpy") 
+                    stream_json_output = gr.JSON(label="Streaming API Info (JSON)")
             
             stream_submit_button.click(
                 fn=stream_tts_func,
                 inputs=[stream_text_input, stream_spk_id_input, stream_speed_input, stream_volume_input, stream_samplerate_input, stream_savepath_input],
-                outputs=[stream_status_output, stream_json_output]
+                outputs=[stream_status_output, stream_audio_output, stream_json_output]
             )
 
         with gr.TabItem("Help & Other Info"):
