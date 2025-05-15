@@ -42,133 +42,155 @@ class TTSServerExecutor(TTSExecutor):
     def _init_from_path(
             self,
             am: str='fastspeech2_csmsc_onnx',
-            am_ckpt: Optional[list]=None,
+            am_ckpt: Optional[list]=None,  # Expect a list from YAML (even for single file AM)
             am_stat: Optional[os.PathLike]=None,
             phones_dict: Optional[os.PathLike]=None,
-            tones_dict: Optional[os.PathLike]=None,
-            speaker_dict: Optional[os.PathLike]=None,
-            am_sample_rate: int=24000,
+            tones_dict: Optional[os.PathLike]=None, # Not used by current ONNX AM but kept for signature
+            speaker_dict: Optional[os.PathLike]=None, # Not used by current ONNX AM but kept for signature
+            am_sample_rate: int=24000, # Used by TTSEngine, not directly here
             am_sess_conf: dict=None,
             voc: str='mb_melgan_csmsc_onnx',
             voc_ckpt: Optional[os.PathLike]=None,
-            voc_sample_rate: int=24000,
+            voc_sample_rate: int=24000, # Used by TTSEngine, not directly here
             voc_sess_conf: dict=None,
             lang: str='zh', ):
         """
-        Init model and other resources from a specific path.
+        Initialize model and other resources from a specific path or by downloading.
         """
 
-        if (hasattr(self, 'am_sess') or
-            (hasattr(self, 'am_encoder_infer_sess') and
-             hasattr(self, 'am_decoder_sess') and hasattr(
-                 self, 'am_postnet_sess'))) and hasattr(self, 'voc_inference'):
-            logger.debug('Models had been initialized.')
+        # Check if AM and Vocoder sessions are already initialized
+        am_initialized = hasattr(self, 'am_sess') or \
+                         (hasattr(self, 'am_encoder_infer_sess') and \
+                          hasattr(self, 'am_decoder_sess') and \
+                          hasattr(self, 'am_postnet_sess'))
+        voc_initialized = hasattr(self, 'voc_sess')
+
+        if am_initialized and voc_initialized:
+            logger.debug('Models have already been initialized.')
             return
 
-        # am
-        am_tag = am + '-' + lang
-        if am == "fastspeech2_csmsc_onnx":
-            # get model info
-            if am_ckpt is None or phones_dict is None:
-                self.task_resource.set_task_model(
-                    model_tag=am_tag,
-                    model_type=0,  # am
-                    version=None,  # default version
-                )
-                self.am_res_path = self.task_resource.res_dir
-                self.am_ckpt = os.path.join(self.am_res_path,
-                                            self.task_resource.res_dict['ckpt'])
-                # must have phones_dict in acoustic
-                self.phones_dict = os.path.join(
-                    self.am_res_path,
-                    self.task_resource.res_dict['phones_dict'])
+        # Acoustic Model (AM)
+        am_tag = f"{am}-{lang}"
+        is_cnndecoder_type = am.startswith("fastspeech2_cnndecoder_")
 
+        # Determine if paths are provided manually or need to be downloaded
+        manual_am_ckpt_provided = am_ckpt is not None and len(am_ckpt) > 0
+        manual_phones_dict_provided = phones_dict is not None
+        # am_stat is only mandatory for cnndecoder type if paths are provided manually
+        manual_am_stat_provided = (am_stat is not None) if is_cnndecoder_type else True 
+        
+        use_pretrained_am = not (manual_am_ckpt_provided and \
+                                 manual_phones_dict_provided and \
+                                 manual_am_stat_provided)
+
+        if use_pretrained_am:
+            logger.info(f"Attempting to download or use cached pretrained AM model for {am_tag}.")
+            self.task_resource.set_task_model(
+                model_tag=am_tag,
+                model_type=0,  # am
+                version=None,  # Use default version
+            )
+            self.am_res_path = self.task_resource.res_dir
+            downloaded_am_ckpt_info = self.task_resource.res_dict['ckpt']  # Can be a string or a list
+
+            if isinstance(downloaded_am_ckpt_info, list):  # For cnndecoder type
+                if len(downloaded_am_ckpt_info) < 3:
+                    raise ValueError(f"Pretrained model {am_tag} ckpt definition expects 3 files for cnndecoder, found {len(downloaded_am_ckpt_info)}")
+                self.am_encoder_infer = os.path.join(self.am_res_path, downloaded_am_ckpt_info[0])
+                self.am_decoder = os.path.join(self.am_res_path, downloaded_am_ckpt_info[1])
+                self.am_postnet = os.path.join(self.am_res_path, downloaded_am_ckpt_info[2])
+            else:  # For regular fastspeech2_onnx
+                self.am_ckpt = os.path.join(self.am_res_path, downloaded_am_ckpt_info)
+            
+            self.phones_dict = os.path.join(self.am_res_path, self.task_resource.res_dict['phones_dict'])
+            
+            if is_cnndecoder_type:
+                if 'speech_stats' in self.task_resource.res_dict:
+                    self.am_stat = os.path.join(self.am_res_path, self.task_resource.res_dict['speech_stats'])
+                else:
+                    logger.error(f"Speech stats expected for AM {am_tag} but not found in its pretrained model definition.")
+                    raise ValueError(f"Missing speech_stats for cnndecoder AM {am_tag}")
             else:
-                self.am_ckpt = os.path.abspath(am_ckpt[0])
-                self.phones_dict = os.path.abspath(phones_dict)
-                self.am_res_path = os.path.dirname(os.path.abspath(am_ckpt))
-
-            # create am sess
-            self.am_sess = get_sess(self.am_ckpt, am_sess_conf)
-
-        elif am == "fastspeech2_cnndecoder_csmsc_onnx":
-            if am_ckpt is None or am_stat is None or phones_dict is None:
-                self.task_resource.set_task_model(
-                    model_tag=am_tag,
-                    model_type=0,  # am
-                    version=None,  # default version
-                )
-                self.am_res_path = self.task_resource.res_dir
-                self.am_encoder_infer = os.path.join(
-                    self.am_res_path, self.task_resource.res_dict['ckpt'][0])
-                self.am_decoder = os.path.join(
-                    self.am_res_path, self.task_resource.res_dict['ckpt'][1])
-                self.am_postnet = os.path.join(
-                    self.am_res_path, self.task_resource.res_dict['ckpt'][2])
-                # must have phones_dict in acoustic
-                self.phones_dict = os.path.join(
-                    self.am_res_path,
-                    self.task_resource.res_dict['phones_dict'])
-                self.am_stat = os.path.join(
-                    self.am_res_path,
-                    self.task_resource.res_dict['speech_stats'])
-
-            else:
+                self.am_stat = None
+        else:
+            logger.info(f"Loading AM model from manually provided paths for {am}.")
+            # am_ckpt from YAML is a list.
+            if is_cnndecoder_type:
+                if not (isinstance(am_ckpt, list) and len(am_ckpt) == 3):
+                    raise ValueError("For cnndecoder AM, am_ckpt must be a list of 3 paths.")
                 self.am_encoder_infer = os.path.abspath(am_ckpt[0])
                 self.am_decoder = os.path.abspath(am_ckpt[1])
                 self.am_postnet = os.path.abspath(am_ckpt[2])
-                self.phones_dict = os.path.abspath(phones_dict)
-                self.am_stat = os.path.abspath(am_stat)
                 self.am_res_path = os.path.dirname(os.path.abspath(am_ckpt[0]))
+                self.am_stat = os.path.abspath(am_stat) # am_stat is mandatory if manual for cnndecoder
+            else: # For regular fastspeech2_onnx
+                if not (isinstance(am_ckpt, list) and len(am_ckpt) == 1):
+                    raise ValueError("For non-cnndecoder AM, am_ckpt must be a list containing a single path.")
+                self.am_ckpt = os.path.abspath(am_ckpt[0])
+                self.am_res_path = os.path.dirname(os.path.abspath(self.am_ckpt))
+                self.am_stat = None # Not used for non-cnndecoder AMs
 
-            # create am sess
-            self.am_encoder_infer_sess = get_sess(self.am_encoder_infer,
-                                                  am_sess_conf)
+            self.phones_dict = os.path.abspath(phones_dict)
+
+        # Create AM ONNX sessions
+        if is_cnndecoder_type:
+            self.am_encoder_infer_sess = get_sess(self.am_encoder_infer, am_sess_conf)
             self.am_decoder_sess = get_sess(self.am_decoder, am_sess_conf)
             self.am_postnet_sess = get_sess(self.am_postnet, am_sess_conf)
+            if self.am_stat: # Should always be true for cnndecoder if loading was successful
+                self.am_mu, self.am_std = np.load(self.am_stat)
+            else: # Should not happen if logic is correct and files are present
+                logger.error(f"AM statistics (am_stat) not loaded for cnndecoder {am}, though it's required.")
+                raise FileNotFoundError(f"Missing am_stat for cnndecoder {am}")
+        elif am.startswith("fastspeech2_"): # For regular fastspeech2_onnx
+            self.am_sess = get_sess(self.am_ckpt, am_sess_conf)
+        else:
+            raise ValueError(f"Unsupported AM type for ONNX: {am}. Must start with 'fastspeech2_' or 'fastspeech2_cnndecoder_'.")
 
-            self.am_mu, self.am_std = np.load(self.am_stat)
+        logger.debug(f"AM model phones_dict: {self.phones_dict}")
+        logger.debug(f"AM model resource path: {self.am_res_path}")
+        logger.debug("Successfully created AM ONNX session(s).")
 
-        logger.debug(f"self.phones_dict: {self.phones_dict}")
-        logger.debug(f"am model dir: {self.am_res_path}")
-        logger.debug("Create am sess successfully.")
-
-        # voc model info
-        voc_tag = voc + '-' + lang
-
+        # Vocoder (Voc)
+        voc_tag = f"{voc}-{lang}"
         if voc_ckpt is None:
+            logger.info(f"Attempting to download or use cached pretrained Vocoder model for {voc_tag}.")
             self.task_resource.set_task_model(
                 model_tag=voc_tag,
                 model_type=1,  # vocoder
-                version=None,  # default version
+                version=None,
             )
             self.voc_res_path = self.task_resource.voc_res_dir
-            self.voc_ckpt = os.path.join(
-                self.voc_res_path, self.task_resource.voc_res_dict['ckpt'])
+            self.voc_ckpt = os.path.join(self.voc_res_path, self.task_resource.voc_res_dict['ckpt'])
         else:
+            logger.info(f"Loading Vocoder model from manually provided path for {voc}.")
             self.voc_ckpt = os.path.abspath(voc_ckpt)
             self.voc_res_path = os.path.dirname(os.path.abspath(self.voc_ckpt))
-        logger.debug(self.voc_res_path)
-
-        # create voc sess
+        
         self.voc_sess = get_sess(self.voc_ckpt, voc_sess_conf)
-        logger.debug("Create voc sess successfully.")
+        logger.debug(f"Vocoder model resource path: {self.voc_res_path}")
+        logger.debug("Successfully created Vocoder ONNX session.")
 
+        # Load vocabulary and frontend
+        if not os.path.exists(self.phones_dict):
+            raise FileNotFoundError(f"Phones dictionary not found at {self.phones_dict}")
         with open(self.phones_dict, "r", encoding='utf-8') as f:
             phn_id = [line.strip().split() for line in f.readlines()]
         self.vocab_size = len(phn_id)
-        logger.debug(f"vocab_size: {self.vocab_size}")
+        logger.debug(f"Vocabulary size: {self.vocab_size}")
 
-        # frontend
-        self.tones_dict = None
+        self.tones_dict = None # Default, can be overridden if tones_dict is provided and used
+        # speaker_dict is also not used by current ONNX AM frontend
+
         if lang == 'zh':
             self.frontend = Frontend(
                 phone_vocab_path=self.phones_dict,
-                tone_vocab_path=self.tones_dict)
-
+                tone_vocab_path=self.tones_dict) # tones_dict will be None if not set
         elif lang == 'en':
             self.frontend = English(phone_vocab_path=self.phones_dict)
-        logger.debug("frontend done!")
+        else:
+            raise ValueError(f"Unsupported language: {lang}. Supported languages are 'zh' and 'en'.")
+        logger.debug("Frontend initialized successfully.")
 
 
 class TTSEngine(BaseEngine):
