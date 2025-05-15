@@ -190,6 +190,13 @@ document.addEventListener('DOMContentLoaded', () => {
             statusDiv.textContent = "Receiving audio stream...";
             playButton.textContent = "Playing...";
             const reader = response.body.getReader();
+
+            // Performance metrics initialization
+            let firstChunkReceivedTime = null;
+            let lastChunkTime = performance.now(); // Initialize lastChunkTime here
+            let totalAudioBytes = 0;
+            let chunkCount = 0;
+            const streamStartTime = performance.now(); // Initialize streamStartTime here
             
             while (true) {
                 if (!isPlaying) { 
