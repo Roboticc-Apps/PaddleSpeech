@@ -1,4 +1,6 @@
-from paddlespeech.cli.tts.infer import TTSExecutor
+from paddlespeech.server.bin.paddlespeech_server import ServerExecutor
 
-tts = TTSExecutor()
-tts(am="fastspeech2_ljspeech",voc="hifigan_ljspeech",lang="en", text="Life was like a box of chocolates, you never know what you're gonna get.", output="output.wav", use_onnx=True)
+server_executor = ServerExecutor()
+server_executor(
+    config_file="./conf/tts_online_application.yaml", 
+    log_file="./log/paddlespeech.log")
