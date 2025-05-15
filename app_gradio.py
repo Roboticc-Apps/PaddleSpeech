@@ -142,13 +142,39 @@ def stream_tts_func(text, spk_id, speed, volume, sample_rate_input, save_path_se
         return "Input text for streaming cannot be empty.", None, \
                format_for_json_output({"error": "Input text for streaming cannot be empty."}, "ClientError", None)
 
+    # --- Get server's native streaming sample rate ---
+    # Ini adalah sample rate yang DIHARAPKAN server untuk menghasilkan audio streaming.
+    server_native_sr = 0
+    try:
+        # Gunakan call_api yang sudah ada, karena endpoint samplerate mengembalikan JSON
+        sr_data, sr_error_type, _ = call_api("GET", "/paddlespeech/tts/streaming/samplerate", expect_json=True)
+        if not sr_error_type and sr_data and "sample_rate" in sr_data:
+            server_native_sr = int(sr_data["sample_rate"])
+            logger.info(f"Successfully fetched server's native streaming sample rate: {server_native_sr} Hz.")
+        else:
+            err_msg = sr_data.get("error", "No sample_rate key in response") if sr_error_type or not sr_data else "No sample_rate key"
+            logger.warning(f"Could not fetch server's native streaming sample rate. Error: {err_msg}")
+    except Exception as e_sr:
+        logger.warning(f"Exception while fetching server's native streaming sample rate: {e_sr}")
+
+    # Jika gagal mendapatkan SR server, gunakan input pengguna jika valid, atau fallback
+    if server_native_sr == 0:
+        if int(sample_rate_input) != 0:
+            server_native_sr = int(sample_rate_input)
+            logger.warning(f"Using sample rate from user input as server_native_sr: {server_native_sr} Hz.")
+        else:
+            server_native_sr = 24000 # Default fallback yang masuk akal (sesuaikan jika model Anda berbeda)
+            logger.warning(f"Using default fallback for server_native_sr: {server_native_sr} Hz.")
+    
     payload = {
         "text": text,
         "spk_id": int(spk_id),
         "speed": float(speed),
         "volume": float(volume),
-        "sample_rate": int(sample_rate_input), # Ini adalah sample rate yang diminta ke server
-        "save_path": save_path_server if save_path_server else "stream_output_from_gradio.wav" # Server mungkin menggunakan ini
+        # Kirim sample_rate_input ke server; server mungkin menggunakannya atau mengabaikannya.
+        # TTSHttpHandler tidak mengirim SR dalam payload POST-nya, tapi API server mungkin menerimanya.
+        "sample_rate": int(sample_rate_input), 
+        "save_path": save_path_server if save_path_server else "stream_output_from_gradio.wav"
     }
     
     # Panggil API, harapkan respons biner (audio mentah), bukan JSON
@@ -159,107 +185,90 @@ def stream_tts_func(text, spk_id, speed, volume, sample_rate_input, save_path_se
     json_to_display = {} # Untuk menampilkan status atau error di komponen JSON
 
     if error_type:
-        # api_result_data di sini adalah error dictionary dari call_api
         json_to_display = format_for_json_output(api_result_data, error_type, api_result_data if error_type else None)
         return f"Error: {api_result_data.get('error', 'Unknown API error')}", None, json_to_display
 
-    # Tidak ada error dari call_api, api_result_data adalah byte audio
     if api_result_data and isinstance(api_result_data, bytes):
         try:
-            actual_sr = 0
-            # Coba dapatkan sample rate dari header (misalnya, server mengirim 'X-Audio-Sample-Rate')
-            # Nama header ini hanya contoh, perlu disesuaikan dengan implementasi server Anda
-            if response_headers:
-                if response_headers.get('X-Audio-Sample-Rate'):
-                    actual_sr = int(response_headers.get('X-Audio-Sample-Rate'))
-                # Jika Content-Type adalah audio/wav, soundfile akan mencoba mendeteksi SR dari header WAV
-                # jadi kita tidak perlu secara eksplisit mengambilnya dari Content-Type di sini.
-
-            # Baca byte audio menjadi array NumPy
-            # soundfile.read akan mencoba mendeteksi format dan sample rate jika memungkinkan (misalnya dari header WAV)
-            
             # Logging tambahan
             if response_headers:
                 logger.info(f"Streaming API Response Headers: {response_headers}")
                 content_type = response_headers.get('Content-Type')
                 logger.info(f"Streaming API Content-Type: {content_type}")
-            
-            # Simpan byte mentah untuk inspeksi jika diperlukan (bisa di-uncomment untuk debug)
-            # with open("debug_stream_output.raw", "wb") as f_raw:
-            #     f_raw.write(api_result_data)
-            # logger.info("Byte audio mentah disimpan ke debug_stream_output.raw untuk inspeksi.")
 
-            sr_from_file = 0
+            # Asumsi: api_result_data adalah audio yang di-encode base64 secara keseluruhan.
+            # Ini berdasarkan bagaimana TTSHttpHandler memproses chunk base64 dan kemudian
+            # kemungkinan server akan mengirim seluruh audio sebagai satu string base64 jika tidak streaming chunk.
             try:
-                # Coba baca sebagai format standar (WAV, FLAC, dll.)
-                audio_data_np, sr_from_file = sf.read(io.BytesIO(api_result_data), dtype='float32')
-                logger.info(f"Berhasil membaca audio sebagai format standar, SR dari file: {sr_from_file} Hz.")
-            except sf.LibsndfileError as e_std:
-                logger.warning(f"Gagal membaca sebagai format audio standar (mis. WAV): {e_std}. Mencoba sebagai RAW PCM.")
-                if actual_sr == 0 and int(sample_rate_input) != 0:
-                    actual_sr = int(sample_rate_input)
-                    logger.info(f"Menggunakan sample rate dari input pengguna untuk percobaan RAW: {actual_sr} Hz.")
-                elif actual_sr == 0:
-                    # Jika SR tidak diketahui sama sekali, sulit untuk RAW.
-                    # Anda bisa mencoba menebak SR umum seperti 24000 atau 16000.
-                    # Atau, lemparkan error jika SR tidak bisa ditentukan.
-                    logger.error("Sample rate tidak diketahui (dari header atau input), tidak dapat mencoba membaca sebagai RAW PCM secara andal.")
-                    raise e_std # Lemparkan error asli jika tidak ada SR untuk dicoba
+                decoded_audio_bytes = base64.b64decode(api_result_data)
+                logger.info(f"Successfully base64 decoded audio data. Original size: {len(api_result_data)}, Decoded size: {len(decoded_audio_bytes)}")
+            except base64.binascii.Error as b64_error:
+                logger.warning(f"Failed to base64 decode the response: {b64_error}. Assuming raw audio bytes if it's not base64.")
+                # Jika gagal decode base64, mungkin server mengirim raw bytes langsung
+                # atau responsnya bukan audio sama sekali (misalnya, pesan error teks/html).
+                # Kita lanjutkan dengan api_result_data apa adanya jika decode gagal,
+                # dan biarkan soundfile mencoba menanganinya.
+                decoded_audio_bytes = api_result_data # Gunakan data asli jika decode gagal
 
-                if actual_sr > 0:
-                    subtypes_to_try = [('FLOAT', 'float32'), ('PCM_16', 'int16')] # subtype soundfile, tipe numpy
-                    raw_read_success = False
-                    for subtype_sf, subtype_np_str in subtypes_to_try:
-                        try:
-                            logger.info(f"Mencoba membaca sebagai RAW PCM, SR={actual_sr}, Channels=1, Subtype={subtype_sf}")
-                            # dtype untuk sf.read adalah tipe data output numpy yang diinginkan
-                            audio_data_np, sr_read_raw = sf.read(io.BytesIO(api_result_data),
-                                                              samplerate=actual_sr,
+            # Simpan byte yang sudah di-decode untuk inspeksi jika diperlukan
+            # with open("debug_stream_output_decoded.raw", "wb") as f_raw:
+            #     f_raw.write(decoded_audio_bytes)
+            # logger.info("Decoded audio bytes (assumed PCM) saved to debug_stream_output_decoded.raw")
+
+            sr_to_use_for_playback = server_native_sr # Mulai dengan SR server yang diketahui/diasumsikan
+            audio_data_np = None
+            
+            try:
+                # Coba baca sebagai format standar (WAV, FLAC, dll.) terlebih dahulu
+                # Ini akan berhasil jika decoded_audio_bytes adalah file WAV yang valid.
+                audio_data_np, sr_from_file_std = sf.read(io.BytesIO(decoded_audio_bytes), dtype='float32')
+                logger.info(f"Berhasil membaca audio (setelah decode/asumsi) sebagai format standar. SR dari file: {sr_from_file_std} Hz.")
+                # Jika berhasil dibaca sebagai format standar, SR dari file lebih diutamakan
+                if sr_from_file_std > 0: # Pastikan SR yang terdeteksi valid
+                    sr_to_use_for_playback = sr_from_file_std
+            except sf.LibsndfileError as e_std:
+                logger.warning(f"Gagal membaca audio (setelah decode/asumsi) sebagai format standar (mis. WAV): {e_std}. Mencoba sebagai RAW PCM.")
+                # Jika gagal, coba baca sebagai RAW PCM 16-bit (sesuai PyAudio width 2 di TTSHttpHandler)
+                # Kita HARUS menggunakan sr_to_use_for_playback (dari /samplerate atau fallback) di sini.
+                if sr_to_use_for_playback > 0:
+                    try:
+                        logger.info(f"Mencoba membaca sebagai RAW PCM, SR={sr_to_use_for_playback}, Channels=1, Subtype=PCM_16")
+                        audio_data_np, _ = sf.read(io.BytesIO(decoded_audio_bytes),
+                                                              samplerate=sr_to_use_for_playback,
                                                               channels=1, # Asumsi mono untuk TTS
                                                               format='RAW',
-                                                              subtype=subtype_sf,
-                                                              dtype='float32') # Selalu minta float32 untuk Gradio
-                            sr_from_file = actual_sr # Untuk RAW, sf.read mengembalikan SR yang kita berikan
-                            logger.info(f"Berhasil membaca sebagai RAW PCM dengan subtype {subtype_sf}.")
-                            raw_read_success = True
-                            break 
-                        except sf.LibsndfileError as e_raw:
-                            logger.warning(f"Gagal membaca sebagai RAW PCM dengan subtype {subtype_sf}: {e_raw}")
-                        except Exception as e_other_raw:
-                            logger.error(f"Error lain saat mencoba RAW PCM subtype {subtype_sf}: {e_other_raw}")
-                    if not raw_read_success:
-                        logger.error("Gagal membaca audio sebagai format standar maupun RAW PCM.")
-                        raise e_std # Lemparkan error standar asli jika semua percobaan RAW gagal
-                else: # actual_sr masih 0
-                    raise e_std # Lemparkan error standar asli jika tidak ada SR untuk dicoba dengan RAW
+                                                              subtype='PCM_16', # Sesuai PyAudio width 2
+                                                              dtype='float32') # Minta float32 untuk Gradio
+                        logger.info("Berhasil membaca sebagai RAW PCM_16.")
+                    except sf.LibsndfileError as e_raw:
+                        logger.error(f"Gagal membaca sebagai RAW PCM_16: {e_raw}")
+                        raise e_raw # Lemparkan error jika RAW PCM juga gagal
+                else: # sr_to_use_for_playback masih 0 (seharusnya tidak terjadi jika fallback SR server bekerja)
+                    logger.error("Sample rate server tidak dapat ditentukan, tidak dapat mencoba RAW PCM.")
+                    raise e_std # Lemparkan error standar asli
 
-            # Tentukan sample rate final untuk digunakan
-            if actual_sr == 0: # Jika tidak ada dari header
-                actual_sr = sr_from_file
-            elif sr_from_file != 0 and actual_sr != sr_from_file:
-                logger.warning(f"Sample rate dari header/input ({actual_sr} Hz) berbeda dengan yang dideteksi dari file ({sr_from_file} Hz). Menggunakan SR dari file ({sr_from_file} Hz).")
-                actual_sr = sr_from_file
-            
-            # Fallback akhir jika SR masih 0 (seharusnya tidak terjadi jika sf.read berhasil)
-            if actual_sr == 0:
-                if int(sample_rate_input) != 0:
-                    actual_sr = int(sample_rate_input)
-                    logger.warning(f"SR masih 0 setelah pembacaan, menggunakan input pengguna: {actual_sr} Hz.")
-                else:
-                    actual_sr = 24000 # Fallback absolut
-                    logger.error(f"Sample rate tidak dapat ditentukan, menggunakan default absolut: {actual_sr} Hz. Audio mungkin tidak diputar dengan benar.")
+            if audio_data_np is None: # Seharusnya tidak terjadi jika salah satu try di atas berhasil
+                raise ValueError("Gagal memproses data audio menjadi NumPy array.")
 
-            status_message = f"Success! Audio received. Sample rate: {actual_sr} Hz."
-            if save_path_server: # Jika server mungkin telah menyimpan file
+            status_message = f"Success! Audio received. Sample rate for playback: {sr_to_use_for_playback} Hz."
+            if save_path_server:
                  status_message += f" Server mungkin telah menyimpan sebagai '{save_path_server}'."
 
-            json_to_display = {"status": "success", "message": status_message, "sample_rate": actual_sr}
-            return status_message, (actual_sr, audio_data_np), json_to_display
+            json_to_display = {"status": "success", "message": status_message, "sample_rate": sr_to_use_for_playback}
+            return status_message, (sr_to_use_for_playback, audio_data_np), json_to_display
         except Exception as e: # Menangkap semua error pemrosesan audio di sini
             status_message = f"Error processing received audio: {e}"
             logger.error(f"Error processing audio: {e}", exc_info=True)
-            raw_text_preview = api_result_data[:100].decode('latin-1') if isinstance(api_result_data, bytes) else str(api_result_data)[:100]
-            json_to_display = {"status": "error", "message": status_message, "details": str(e), "raw_preview": raw_text_preview}
+            # Tampilkan preview dari data yang mungkin bukan base64 atau audio
+            raw_preview_text = ""
+            if isinstance(api_result_data, bytes):
+                try:
+                    raw_preview_text = api_result_data[:200].decode('utf-8', errors='replace')
+                except:
+                    raw_preview_text = str(api_result_data[:200])
+            else:
+                raw_preview_text = str(api_result_data)[:200]
+            json_to_display = {"status": "error", "message": status_message, "details": str(e), "raw_preview": raw_preview_text}
             return status_message, None, json_to_display
     else:
         status_message = "API call successful but no audio data (bytes) received."
