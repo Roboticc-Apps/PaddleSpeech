@@ -196,24 +196,45 @@ def stream_tts_func(text, spk_id, speed, volume, sample_rate_input, save_path_se
                 content_type = response_headers.get('Content-Type')
                 logger.info(f"Streaming API Content-Type: {content_type}")
 
-            # Asumsi: api_result_data adalah audio yang di-encode base64 secara keseluruhan.
-            # Ini berdasarkan bagaimana TTSHttpHandler memproses chunk base64 dan kemudian
-            # kemungkinan server akan mengirim seluruh audio sebagai satu string base64 jika tidak streaming chunk.
+            # Berdasarkan perilaku TTSHttpHandler yang men-decode base64 per chunk,
+            # ada kemungkinan bahwa ketika kita TIDAK men-stream (requests menggabungkan semua chunk),
+            # server mungkin mengirim:
+            # 1. Seluruh audio yang di-encode base64 SEKALI (ideal).
+            # 2. Byte audio mentah langsung (tanpa base64 sama sekali).
+            # 3. Gabungan dari string base64 per chunk (ini akan jadi base64 yang tidak valid).
+
+            decoded_audio_bytes = None
+            # is_likely_base64_encoded = False # Tidak digunakan secara eksplisit saat ini
+
+            # Coba deteksi apakah ini mungkin base64. String base64 biasanya lebih panjang dari data aslinya.
+            # Dan hanya berisi karakter tertentu. Ini bukan deteksi sempurna.
+            # Karakter valid: A-Z, a-z, 0-9, +, /, =
+            # Kita bisa mencoba decode, dan jika gagal, anggap itu bukan base64.
             try:
-                decoded_audio_bytes = base64.b64decode(api_result_data)
-                logger.info(f"Successfully base64 decoded audio data. Original size: {len(api_result_data)}, Decoded size: {len(decoded_audio_bytes)}")
+                # Coba decode. Jika ini bukan string base64 yang valid, akan error.
+                # Jika ini adalah gabungan dari beberapa string base64, ini juga akan error atau salah.
+                temp_decoded = base64.b64decode(api_result_data, validate=True)
+                # Jika berhasil tanpa error, kemungkinan ini adalah satu blok base64.
+                # Periksa apakah ukurannya masuk akal (decode base64 mengurangi ukuran sekitar 25%)
+                # Heuristik: ukuran decode harus antara ~50% dan ~80% dari ukuran encode.
+                # Ukuran persisnya adalah ceil(n/4)*3 - (jumlah '=' di akhir).
+                # Untuk data audio yang besar, rasio mendekati 0.75.
+                if len(temp_decoded) > 0 and (len(api_result_data) * 0.5 < len(temp_decoded) < len(api_result_data) * 0.85):
+                    decoded_audio_bytes = temp_decoded
+                    # is_likely_base64_encoded = True
+                    logger.info(f"Successfully base64 decoded audio data. Original size: {len(api_result_data)}, Decoded size: {len(decoded_audio_bytes)}")
+                else:
+                    logger.warning(f"Base64 decode menghasilkan ukuran yang tidak terduga (original: {len(api_result_data)}, decoded: {len(temp_decoded)}) atau decoded size 0. Mengasumsikan bukan base64 yang valid atau data kosong.")
+                    decoded_audio_bytes = api_result_data # Fallback ke data asli
             except base64.binascii.Error as b64_error:
-                logger.warning(f"Failed to base64 decode the response: {b64_error}. Assuming raw audio bytes if it's not base64.")
-                # Jika gagal decode base64, mungkin server mengirim raw bytes langsung
-                # atau responsnya bukan audio sama sekali (misalnya, pesan error teks/html).
-                # Kita lanjutkan dengan api_result_data apa adanya jika decode gagal,
-                # dan biarkan soundfile mencoba menanganinya.
+                logger.warning(f"Failed to base64 decode the response as a single block: {b64_error}. Assuming raw audio bytes.")
                 decoded_audio_bytes = api_result_data # Gunakan data asli jika decode gagal
 
-            # Simpan byte yang sudah di-decode untuk inspeksi jika diperlukan
-            # with open("debug_stream_output_decoded.raw", "wb") as f_raw:
+            # Simpan byte yang akan diproses untuk inspeksi jika diperlukan
+            # file_to_debug = "debug_stream_output_processed.raw"
+            # with open(file_to_debug, "wb") as f_raw:
             #     f_raw.write(decoded_audio_bytes)
-            # logger.info("Decoded audio bytes (assumed PCM) saved to debug_stream_output_decoded.raw")
+            # logger.info(f"Bytes to be processed by soundfile saved to {file_to_debug}")
 
             sr_to_use_for_playback = server_native_sr # Mulai dengan SR server yang diketahui/diasumsikan
             audio_data_np = None
@@ -261,12 +282,12 @@ def stream_tts_func(text, spk_id, speed, volume, sample_rate_input, save_path_se
             logger.error(f"Error processing audio: {e}", exc_info=True)
             # Tampilkan preview dari data yang mungkin bukan base64 atau audio
             raw_preview_text = ""
-            if isinstance(api_result_data, bytes):
+            if isinstance(api_result_data, bytes): # api_result_data adalah data asli sebelum decode
                 try:
                     raw_preview_text = api_result_data[:200].decode('utf-8', errors='replace')
-                except:
-                    raw_preview_text = str(api_result_data[:200])
-            else:
+                except: # Fallback jika decode ke utf-8 gagal
+                    raw_preview_text = str(api_result_data[:200]) # Representasi string dari byte
+            else: # Jika api_result_data bukan bytes (seharusnya tidak terjadi di sini)
                 raw_preview_text = str(api_result_data)[:200]
             json_to_display = {"status": "error", "message": status_message, "details": str(e), "raw_preview": raw_preview_text}
             return status_message, None, json_to_display
