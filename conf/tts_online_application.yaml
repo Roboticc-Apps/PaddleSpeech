@@ -10,7 +10,7 @@ port: 8092
 # engine_list choices = ['tts_online', 'tts_online-onnx'], the inference speed of tts_online-onnx is faster than tts_online.
 # protocol choices = ['websocket', 'http'] 
 protocol: 'http'
-engine_list: ['tts_online-onnx']
+engine_list: ['tts_online']
 
 
 #################################################################################
@@ -22,7 +22,7 @@ engine_list: ['tts_online-onnx']
 tts_online: 
     # am (acoustic model) choices=['fastspeech2_csmsc', 'fastspeech2_cnndecoder_csmsc']   
     # fastspeech2_cnndecoder_csmsc support streaming am infer.     
-    am: 'fastspeech2_csmsc'   
+    am: 'fastspeech2_ljspeech'   
     am_config: 
     am_ckpt: 
     am_stat: 
@@ -33,13 +33,13 @@ tts_online:
 
     # voc (vocoder) choices=['mb_melgan_csmsc, hifigan_csmsc']
     # Both mb_melgan_csmsc and hifigan_csmsc support streaming voc inference
-    voc: 'mb_melgan_csmsc'
+    voc: 'hifigan_ljspeech'
     voc_config: 
     voc_ckpt: 
     voc_stat: 
 
     # others
-    lang: 'zh'
+    lang: 'en'
     device: 'cpu' # set 'gpu:id' or 'cpu'
     # am_block and am_pad only for fastspeech2_cnndecoder_onnx model to streaming am infer,
     # when am_pad set 12, streaming synthetic audio is the same as non-streaming synthetic audio
