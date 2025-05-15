@@ -366,112 +366,111 @@ class PaddleTTSConnectionHandler:
         frontend_et = time.time()
         self.frontend_time = frontend_et - frontend_st
 
-        for i in range(len(phone_ids)):
-            part_phone_ids = phone_ids[i].numpy()
-            voc_chunk_id = 0
+        for sent_idx in range(len(phone_ids)): # Iterate per sentence or text part
+            part_phone_ids = phone_ids[sent_idx].numpy() # Ensure it's a numpy array
+            voc_chunk_id = 0 # Reset vocoder chunk id for each sentence part
+            first_am_et_current_sent = None # To store AM end time for current sentence part
 
-            # fastspeech2_csmsc
-            if am == "fastspeech2_csmsc_onnx":
-                # am 
+            # Generic fastspeech2_..._onnx (non-cnndecoder type)
+            if am.startswith("fastspeech2_") and not am.startswith("fastspeech2_cnndecoder_"):
+                # AM inference (non-streaming for AM part)
                 mel = self.executor.am_sess.run(
                     output_names=None, input_feed={'text': part_phone_ids})
-                mel = mel[0]
-                if first_flag == 1:
-                    first_am_et = time.time()
-                    self.first_am_infer = first_am_et - frontend_et
+                mel = mel[0]  # Get the mel-spectrogram output
+                
+                if first_flag == 1: # Timing for the very first AM processing
+                    first_am_et_current_sent = time.time()
+                    self.first_am_infer = first_am_et_current_sent - frontend_et
 
-                # voc streaming
-                mel_chunks = get_chunks(mel, self.voc_block, self.voc_pad,
-                                        "voc")
+                # Vocoder streaming
+                mel_chunks = get_chunks(mel, self.voc_block, self.voc_pad, "voc")
                 voc_chunk_num = len(mel_chunks)
-                voc_st = time.time()
-                for i, mel_chunk in enumerate(mel_chunks):
+                
+                for voc_idx, mel_chunk in enumerate(mel_chunks):
                     sub_wav = self.executor.voc_sess.run(
                         output_names=None, input_feed={'logmel': mel_chunk})
-                    sub_wav = self.depadding(sub_wav[0], voc_chunk_num, i,
+                    sub_wav = self.depadding(sub_wav[0], voc_chunk_num, voc_idx,
                                              self.voc_block, self.voc_pad,
                                              self.voc_upsample)
-                    if first_flag == 1:
+                    if first_flag == 1: # Timing for the very first vocoder chunk
                         first_voc_et = time.time()
-                        self.first_voc_infer = first_voc_et - first_am_et
+                        # Use frontend_et if AM was too fast or not timed for the first chunk
+                        am_end_time_for_calc = first_am_et_current_sent if first_am_et_current_sent else frontend_et
+                        self.first_voc_infer = first_voc_et - am_end_time_for_calc
                         self.first_response_time = first_voc_et - frontend_st
                         first_flag = 0
-
+                    
                     yield sub_wav
 
-            # fastspeech2_cnndecoder_csmsc 
-            elif am == "fastspeech2_cnndecoder_csmsc_onnx":
-                # am 
+            # Generic fastspeech2_cnndecoder_..._onnx
+            elif am.startswith("fastspeech2_cnndecoder_"):
+                # AM encoder inference
                 orig_hs = self.executor.am_encoder_infer_sess.run(
                     None, input_feed={'text': part_phone_ids})
                 orig_hs = orig_hs[0]
 
-                # streaming voc chunk info
                 mel_len = orig_hs.shape[1]
                 voc_chunk_num = math.ceil(mel_len / self.voc_block)
                 start = 0
                 end = min(self.voc_block + self.voc_pad, mel_len)
+                
+                mel_streaming = None # Initialize mel_streaming for concatenation
 
-                # streaming am
+                # Streaming AM (decoder and postnet)
                 hss = get_chunks(orig_hs, self.am_block, self.am_pad, "am")
                 am_chunk_num = len(hss)
-                for i, hs in enumerate(hss):
+                for am_idx, hs_chunk in enumerate(hss):
                     am_decoder_output = self.executor.am_decoder_sess.run(
-                        None, input_feed={'xs': hs})
+                        None, input_feed={'xs': hs_chunk})
                     am_postnet_output = self.executor.am_postnet_sess.run(
                         None,
-                        input_feed={
-                            'xs': np.transpose(am_decoder_output[0], (0, 2, 1))
-                        })
-                    am_output_data = am_decoder_output + np.transpose(
-                        am_postnet_output[0], (0, 2, 1))
-                    normalized_mel = am_output_data[0][0]
+                        input_feed={'xs': np.transpose(am_decoder_output[0], (0, 2, 1))})
+                    
+                    # Ensure am_output_data is a numpy array before indexing
+                    am_output_data_np = am_decoder_output[0] + np.transpose(am_postnet_output[0], (0, 2, 1))
+                    normalized_mel = am_output_data_np[0][0]
 
-                    sub_mel = denorm(normalized_mel, self.executor.am_mu,
-                                     self.executor.am_std)
-                    sub_mel = self.depadding(sub_mel, am_chunk_num, i,
-                                             self.am_block, self.am_pad,
-                                             self.am_upsample)
+                    sub_mel = denorm(normalized_mel, self.executor.am_mu, self.executor.am_std)
+                    sub_mel = self.depadding(sub_mel, am_chunk_num, am_idx,
+                                             self.am_block, self.am_pad, self.am_upsample)
 
-                    if i == 0:
+                    if am_idx == 0:
                         mel_streaming = sub_mel
                     else:
-                        mel_streaming = np.concatenate(
-                            (mel_streaming, sub_mel), axis=0)
+                        mel_streaming = np.concatenate((mel_streaming, sub_mel), axis=0)
 
-                    # streaming voc
-                    # 当流式AM推理的mel帧数大于流式voc推理的chunk size，开始进行流式voc 推理
-                    while (mel_streaming.shape[0] >= end and
-                           voc_chunk_id < voc_chunk_num):
-                        if first_flag == 1:
-                            first_am_et = time.time()
-                            self.first_am_infer = first_am_et - frontend_et
-                        voc_chunk = mel_streaming[start:end, :]
-
+                    # Streaming Vocoder, process accumulated mel frames
+                    while (mel_streaming.shape[0] >= end and voc_chunk_id < voc_chunk_num):
+                        if first_flag == 1 and first_am_et_current_sent is None: # Time after first AM chunk processed
+                            first_am_et_current_sent = time.time()
+                            self.first_am_infer = first_am_et_current_sent - frontend_et
+                        
+                        voc_input_chunk = mel_streaming[start:end, :]
                         sub_wav = self.executor.voc_sess.run(
-                            output_names=None, input_feed={'logmel': voc_chunk})
+                            output_names=None, input_feed={'logmel': voc_input_chunk})
                         sub_wav = self.depadding(
                             sub_wav[0], voc_chunk_num, voc_chunk_id,
                             self.voc_block, self.voc_pad, self.voc_upsample)
-                        if first_flag == 1:
+                        
+                        if first_flag == 1: # Timing for the very first vocoder chunk
                             first_voc_et = time.time()
-                            self.first_voc_infer = first_voc_et - first_am_et
+                            am_end_time_for_calc = first_am_et_current_sent if first_am_et_current_sent else frontend_et
+                            self.first_voc_infer = first_voc_et - am_end_time_for_calc
                             self.first_response_time = first_voc_et - frontend_st
                             first_flag = 0
-
+                        
                         yield sub_wav
 
                         voc_chunk_id += 1
-                        start = max(
-                            0, voc_chunk_id * self.voc_block - self.voc_pad)
-                        end = min(
-                            (voc_chunk_id + 1) * self.voc_block + self.voc_pad,
-                            mel_len)
-
+                        start = max(0, voc_chunk_id * self.voc_block - self.voc_pad)
+                        end = min((voc_chunk_id + 1) * self.voc_block + self.voc_pad, mel_len)
+            
             else:
                 logger.error(
-                    "Only support fastspeech2_csmsc or fastspeech2_cnndecoder_csmsc on streaming tts."
+                    f"Unsupported ONNX AM model for streaming: {am}. "
+                    "Supported models must start with 'fastspeech2_' or 'fastspeech2_cnndecoder_' and be ONNX format."
                 )
+                return # Stop the generator if AM model is not supported to prevent further errors
 
         self.final_response_time = time.time() - frontend_st
 
