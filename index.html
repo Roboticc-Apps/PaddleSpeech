@@ -45,6 +45,15 @@
     <button id="stop-button" disabled>Stop Stream</button>
     <div id="status">Ready.</div>
 
+    <div id="performance-metrics" style="margin-top: 20px; border: 1px solid #eee; padding: 10px; border-radius: 4px; display: none;">
+        <h3>Performance Metrics:</h3>
+        <p>Time to First Chunk: <span id="metric-ttfb">-</span> s</p>
+        <p>Total Chunks Received: <span id="metric-chunks">-</span></p>
+        <p>Total Audio Bytes (PCM): <span id="metric-bytes">-</span></p>
+        <p>Estimated Audio Duration: <span id="metric-audio-duration">-</span> s</p>
+        <p>Total Streaming Time: <span id="metric-total-time">-</span> s</p>
+    </div>
+
     <script src="app.js"></script>
 </body>
 </html>

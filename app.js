@@ -8,6 +8,14 @@ document.addEventListener('DOMContentLoaded', () => {
     const stopButton = document.getElementById('stop-button');
     const statusDiv = document.getElementById('status');
 
+    // Elemen untuk metrik performa
+    const performanceMetricsDiv = document.getElementById('performance-metrics');
+    const metricTtfb = document.getElementById('metric-ttfb');
+    const metricChunks = document.getElementById('metric-chunks');
+    const metricBytes = document.getElementById('metric-bytes');
+    const metricAudioDuration = document.getElementById('metric-audio-duration');
+    const metricTotalTime = document.getElementById('metric-total-time');
+
     let audioContext;
     let sampleRateFromServer = 0;
     let nextPlayTime = 0;
@@ -110,6 +118,14 @@ document.addEventListener('DOMContentLoaded', () => {
     playButton.addEventListener('click', async () => {
         if (isPlaying) return; 
 
+        // Reset dan sembunyikan metrik performa sebelum memulai
+        performanceMetricsDiv.style.display = 'none';
+        metricTtfb.textContent = '-';
+        metricChunks.textContent = '-';
+        metricBytes.textContent = '-';
+        metricAudioDuration.textContent = '-';
+        metricTotalTime.textContent = '-';
+
         const text = textInput.value.trim();
         const spk_id = parseInt(spkIdInput.value, 10);
         const speed = parseFloat(speedInput.value);
@@ -184,21 +200,65 @@ document.addEventListener('DOMContentLoaded', () => {
 
                 const { done, value } = await reader.read();
                 if (done) {
+                    const streamEndTime = performance.now();
                     console.log("Stream finished.");
                     statusDiv.textContent = "Stream finished.";
+                    
+                    const totalStreamDuration = (streamEndTime - streamStartTime) / 1000;
+                    // Pastikan sampleRateFromServer valid sebelum pembagian
+                    const audioDuration = (sampleRateFromServer > 0 && totalAudioBytes > 0) ? totalAudioBytes / (sampleRateFromServer * 2) : 0; // 2 bytes per sample (Int16)
+                    
+                    console.log(`Total chunks received: ${chunkCount}`);
+                    console.log(`Total raw audio bytes: ${totalAudioBytes}`);
+                    console.log(`Estimated audio duration: ${audioDuration.toFixed(3)}s`);
+                    console.log(`Total streaming time (network + processing): ${totalStreamDuration.toFixed(3)}s`);
+                    
+                    // Update metrik di UI
+                    performanceMetricsDiv.style.display = 'block';
+                    metricChunks.textContent = chunkCount;
+                    metricBytes.textContent = totalAudioBytes;
+                    metricAudioDuration.textContent = audioDuration.toFixed(3);
+                    metricTotalTime.textContent = totalStreamDuration.toFixed(3);
+                    
+                    if (firstChunkReceivedTime) {
+                         // Waktu dari awal request hingga chunk terakhir diterima (bukan dari chunk pertama)
+                         const timeToLastChunkFromStart = (streamEndTime - streamStartTime) / 1000; // Ini sama dengan totalStreamDuration
+                         console.log(`Time from request to last chunk: ${timeToLastChunkFromStart.toFixed(3)}s`);
+                    }
                     break;
                 }
                 
+                const currentTime = performance.now();
+                const timeSinceLastChunk = (currentTime - lastChunkTime) / 1000;
+                lastChunkTime = currentTime;
+                chunkCount++;
+
+                if (firstChunkReceivedTime === null) {
+                    firstChunkReceivedTime = currentTime;
+                    const timeToFirstChunk = (firstChunkReceivedTime - streamStartTime) / 1000;
+                    console.log(`Time to first audio chunk: ${timeToFirstChunk.toFixed(3)}s`);
+                    statusDiv.textContent = `Receiving audio (First chunk: ${timeToFirstChunk.toFixed(3)}s)...`;
+                    
+                    // Tampilkan TTFB di UI
+                    performanceMetricsDiv.style.display = 'block'; // Tampilkan box metrik
+                    metricTtfb.textContent = timeToFirstChunk.toFixed(3);
+                }
+                
                 try {
-                    const base64ChunkString = new TextDecoder().decode(value);
+                    const base64ChunkString = new TextDecoder().decode(value); // value is Uint8Array
                     const binaryString = atob(base64ChunkString); 
                     const len = binaryString.length;
                     const bytes = new Uint8Array(len);
                     for (let i = 0; i < len; i++) {
                         bytes[i] = binaryString.charCodeAt(i);
                     }
+                    
+                    totalAudioBytes += bytes.byteLength;
                     const pcmInt16 = new Int16Array(bytes.buffer);
+
+                    console.log(`Chunk ${chunkCount}: Received ${value.byteLength} bytes (base64), Decoded to ${bytes.byteLength} PCM bytes. Time since last: ${timeSinceLastChunk.toFixed(3)}s`);
                     scheduleChunkPlayback(pcmInt16);
+
                 } catch (e) {
                     console.error("Error processing chunk:", e, "Chunk as text:", new TextDecoder().decode(value, {stream: true}));
                     statusDiv.textContent = `Error processing audio chunk: ${e.message}`;
