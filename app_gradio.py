@@ -254,7 +254,6 @@ with gr.Blocks(theme=gr.themes.Soft()) as demo:
                 outputs=[tts_status_output, tts_audio_output, tts_json_output]
             )
 
-        with gr.TabItem("Streaming TTS (Info)"):
         with gr.TabItem("Streaming TTS"): # Nama tab diubah sedikit
             gr.Markdown("## Streaming TTS (Request and Play)") # Judul diubah
             gr.Markdown(
