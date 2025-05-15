@@ -5,7 +5,7 @@ import os
 PORT = 8000
 # Serve files from the directory where the script is run.
 # This assumes index.html and app.js are in the same directory as static_server.py
-DIRECTORY_TO_SERVE = "./frontend"  # Change this to the directory you want to serve
+DIRECTORY_TO_SERVE = "."  # Change this to the directory you want to serve
 
 class SimpleHTTPRequestHandlerWithCORS(http.server.SimpleHTTPRequestHandler):
     def __init__(self, *args, **kwargs):
