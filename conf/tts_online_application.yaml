@@ -70,7 +70,7 @@ tts_online-onnx:
     phones_dict: 
     tones_dict: 
     speaker_dict: 
-    am_sample_rate: 24000
+    am_sample_rate: 22050
     am_sess_conf:
         device: "cpu" # set 'gpu:id' or 'cpu'
         use_trt: False
@@ -80,7 +80,7 @@ tts_online-onnx:
     # Both mb_melgan_csmsc_onnx and hifigan_csmsc_onnx support streaming voc inference
     voc: 'hifigan_ljspeech_onnx'
     voc_ckpt: 
-    voc_sample_rate: 24000
+    voc_sample_rate: 22050
     voc_sess_conf:
         device: "cpu" # set 'gpu:id' or 'cpu'
         use_trt: False
@@ -98,5 +98,5 @@ tts_online-onnx:
     voc_block: 36
     voc_pad: 19
     # voc_upsample should be same as n_shift on voc config.
-    voc_upsample: 300
+    voc_upsample: 256
     
